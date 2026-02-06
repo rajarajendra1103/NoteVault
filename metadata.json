@@ -1,0 +1,9 @@
+
+{
+  "name": "NoteVault - Personal Notebook & Bookmark Saver",
+  "description": "A sophisticated personal digital workspace for capturing notes, saving bookmarks, and organizing your digital life with AI-powered tagging and search.",
+  "requestFramePermissions": [
+    "camera",
+    "microphone"
+  ]
+}
