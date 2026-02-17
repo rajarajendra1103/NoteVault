@@ -9,7 +9,7 @@ import { BookmarkIcon, NoteIcon, PlusIcon, SearchIcon, TagIcon } from './compone
 
 export default function Home() {
     const [entries, setEntries] = useState<Entry[]>([]);
-    const [isInitialized, setIsInitialized] = useState(false);
+    const [isLoading, setIsLoading] = useState(true);
 
     const [currentView, setCurrentView] = useState<ViewType>('all');
     const [searchQuery, setSearchQuery] = useState('');
@@ -18,19 +18,48 @@ export default function Home() {
     const [editingEntry, setEditingEntry] = useState<Entry | null>(null);
     const [previewEntry, setPreviewEntry] = useState<Entry | null>(null);
 
-    // Initialize from localStorage
-    useEffect(() => {
-        const saved = localStorage.getItem('mindvault_entries');
-        if (saved) {
-            setEntries(JSON.parse(saved));
+    // Map API data to Entry type
+    const mapToEntry = (item: any, type: EntryType): Entry => ({
+        id: item._id,
+        type: type,
+        title: item.title,
+        content: type === 'note' ? item.content : item.url,
+        description: item.description,
+        tags: item.tags || [],
+        createdAt: new Date(item.createdAt).getTime(),
+        updatedAt: new Date(item.updatedAt).getTime(),
+    });
+
+    // Fetch data from API
+    const fetchEntries = async () => {
+        setIsLoading(true);
+        try {
+            const [notesRes, bookmarksRes] = await Promise.all([
+                fetch('/api/notes'),
+                fetch('/api/bookmarks')
+            ]);
+
+            const notesData = await notesRes.json();
+            const bookmarksData = await bookmarksRes.json();
+
+            const notes = (notesData.data || []).map((n: any) => mapToEntry(n, 'note'));
+            const bookmarks = (bookmarksData.data || []).map((b: any) => mapToEntry(b, 'bookmark'));
+
+            setEntries([...notes, ...bookmarks]);
+        } catch (error) {
+            console.error('Error fetching entries:', error);
+        } finally {
+            setIsLoading(false);
         }
+    };
+
+    useEffect(() => {
+        fetchEntries();
 
         const hash = window.location.hash.replace('#/', '');
         if (hash === 'notes' || hash === 'bookmarks') {
             setCurrentView(hash as ViewType);
         }
-
-        setIsInitialized(true);
     }, []);
 
     useEffect(() => {
@@ -45,12 +74,6 @@ export default function Home() {
         window.addEventListener('hashchange', handleHashChange);
         return () => window.removeEventListener('hashchange', handleHashChange);
     }, []);
-
-    useEffect(() => {
-        if (isInitialized) {
-            localStorage.setItem('mindvault_entries', JSON.stringify(entries));
-        }
-    }, [entries, isInitialized]);
 
     const allTags = useMemo(() => {
         const tags = new Set<string>();
@@ -81,36 +104,73 @@ export default function Home() {
         setSelectedTag(null);
     };
 
-    const handleSaveEntry = (entryData: Partial<Entry>) => {
-        let finalEntry: Entry;
-        if (entryData.id) {
-            setEntries(prev => prev.map(e => {
-                if (e.id === entryData.id) {
-                    finalEntry = { ...e, ...entryData, updatedAt: Date.now() } as Entry;
-                    return finalEntry;
-                }
-                return e;
-            }));
+    const handleSaveEntry = async (entryData: Partial<Entry>) => {
+        const type = entryData.type || (editingEntry?.type) || 'note';
+        const endpoint = type === 'note' ? '/api/notes' : '/api/bookmarks';
+        const body: any = {
+            title: entryData.title,
+            tags: entryData.tags,
+            description: entryData.description,
+        };
+
+        if (type === 'note') {
+            body.content = entryData.content;
         } else {
-            finalEntry = {
-                id: Math.random().toString(36).substr(2, 9),
-                type: entryData.type as EntryType,
-                title: entryData.title || '',
-                content: entryData.content || '',
-                description: entryData.description,
-                tags: entryData.tags || [],
-                createdAt: Date.now(),
-                updatedAt: Date.now(),
-            };
-            setEntries(prev => [finalEntry, ...prev]);
+            body.url = entryData.content;
         }
-        setEditingEntry(null);
+
+        try {
+            let res;
+            if (entryData.id) {
+                // Update
+                res = await fetch(`${endpoint}/${entryData.id}`, {
+                    method: 'PUT',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(body),
+                });
+            } else {
+                // Create
+                res = await fetch(endpoint, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(body),
+                });
+            }
+
+            if (!res.ok) {
+                const errorData = await res.json().catch(() => ({ message: 'Unknown server error' }));
+                throw new Error(errorData.message || `Server returned ${res.status}`);
+            }
+
+            const result = await res.json();
+            if (result.success) {
+                const finalEntry = mapToEntry(result.data, type as EntryType);
+                if (entryData.id) {
+                    setEntries(prev => prev.map(e => e.id === entryData.id ? finalEntry : e));
+                } else {
+                    setEntries(prev => [finalEntry, ...prev]);
+                }
+            }
+            setEditingEntry(null);
+        } catch (error: any) {
+            console.error('Error saving entry:', error);
+            alert(`Failed to save: ${error.message}`);
+        }
     };
 
-    const handleDelete = (id: string) => {
+    const handleDelete = async (id: string, type: EntryType) => {
         if (confirm('Are you sure you want to permanently remove this from your vault?')) {
-            setEntries(prev => prev.filter(e => e.id !== id));
-            if (previewEntry?.id === id) setPreviewEntry(null);
+            const endpoint = type === 'note' ? `/api/notes/${id}` : `/api/bookmarks/${id}`;
+            try {
+                const res = await fetch(endpoint, { method: 'DELETE' });
+                const result = await res.json();
+                if (result.success) {
+                    setEntries(prev => prev.filter(e => e.id !== id));
+                    if (previewEntry?.id === id) setPreviewEntry(null);
+                }
+            } catch (error) {
+                console.error('Error deleting entry:', error);
+            }
         }
     };
 
@@ -135,7 +195,16 @@ export default function Home() {
         setIsModalOpen(true);
     };
 
-    if (!isInitialized) return null;
+    if (isLoading) {
+        return (
+            <div className="min-h-screen flex items-center justify-center bg-[#F8FAFC]">
+                <div className="flex flex-col items-center gap-4">
+                    <div className="w-12 h-12 border-4 border-indigo-600 border-t-transparent rounded-full animate-spin"></div>
+                    <p className="text-slate-500 font-bold animate-pulse">Accessing your vault...</p>
+                </div>
+            </div>
+        );
+    }
 
     return (
         <div className="min-h-screen flex flex-col md:flex-row bg-[#F8FAFC]">
@@ -276,7 +345,7 @@ export default function Home() {
                                     key={entry.id}
                                     entry={entry}
                                     onEdit={openEditModal}
-                                    onDelete={handleDelete}
+                                    onDelete={() => handleDelete(entry.id, entry.type)}
                                     onTagClick={setSelectedTag}
                                     onPreview={setPreviewEntry}
                                 />
